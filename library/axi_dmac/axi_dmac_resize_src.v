@@ -72,7 +72,7 @@ end else begin
       valid <= 1'b0;
       mask <= 'h1;
     end else if (src_data_valid == 1'b1) begin
-      valid <= mask[RATIO-1];
+      valid <= mask[RATIO-1] || src_data_last;
       mask <= {mask[RATIO-2:0],mask[RATIO-1]};
     end else begin
       valid <= 1'b0;

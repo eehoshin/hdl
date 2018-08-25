@@ -256,6 +256,9 @@ wire [BEATS_PER_BURST_WIDTH_SRC-1:0] src_req_last_burst_length;
 wire src_req_sync_transfer_start;
 wire src_req_xlast;
 
+reg [DMA_ADDRESS_WIDTH_DEST-1:0] src_req_dest_address_cur = 'h0;
+reg src_req_xlast_cur = 1'b0;
+
 /* TODO
 wire src_response_valid;
 wire src_response_ready;
@@ -289,6 +292,11 @@ wire [BEATS_PER_BURST_WIDTH_DEST-1:0] dest_measured_last_burst_length;
 wire [BYTES_PER_BURST_WIDTH-1:0] dest_data_burst_length;
 wire                             dest_data_burst_partial;
 wire [ID_WIDTH-1:0] dest_data_id;
+
+reg src_dest_valid_hs = 1'b0;
+wire src_dest_valid_hs_masked;
+wire src_dest_ready_hs;
+wire block_descr_to_dst;
 
 /* Unused for now
 wire response_src_valid;
@@ -561,6 +569,7 @@ assign dbg_src_address_id = src_address_id;
 assign dbg_src_data_id = src_data_id;
 
 assign src_partial_burst = 1'b0;
+assign block_descr_to_dst = 1'b0;
 
 dmac_src_mm_axi #(
   .ID_WIDTH(ID_WIDTH),
@@ -668,9 +677,14 @@ dmac_src_axi_stream #(
 
   .eot(src_eot),
 
+  .rewind_req_valid(),
+  .rewind_req_ready(1'b1),
+  .rewind_req_data(),
+
   .bl_valid(src_bl_valid),
   .bl_ready(src_bl_ready),
   .measured_last_burst_length(src_measured_last_burst_length),
+  .block_descr_to_dst(block_descr_to_dst),
 
   .source_id(source_id),
   .source_eot(source_eot),
@@ -713,6 +727,7 @@ assign src_response_valid = 1'b0;
 assign src_response_resp = 2'b0;
 */
 assign src_partial_burst = 1'b0;
+assign block_descr_to_dst = 1'b0;
 
 dmac_src_fifo_inf #(
   .ID_WIDTH(ID_WIDTH),
@@ -900,6 +915,7 @@ splitter #(
   })
 );
 
+
 util_axis_fifo #(
   .DATA_WIDTH(DMA_ADDRESS_WIDTH_DEST + 1),
   .ADDRESS_WIDTH(0),
@@ -907,12 +923,12 @@ util_axis_fifo #(
 ) i_dest_req_fifo (
   .s_axis_aclk(src_clk),
   .s_axis_aresetn(src_resetn),
-  .s_axis_valid(src_dest_valid),
-  .s_axis_ready(src_dest_ready),
+  .s_axis_valid(src_dest_valid_hs_masked),
+  .s_axis_ready(src_dest_ready_hs),
   .s_axis_empty(),
   .s_axis_data({
-    src_req_dest_address,
-    src_req_xlast
+    src_req_dest_address_cur,
+    src_req_xlast_cur
   }),
   .s_axis_room(),
 
@@ -960,22 +976,27 @@ util_axis_fifo #(
   .m_axis_level()
 );
 
-splitter #(
-  .NUM_M(2)
-) i_src_splitter (
-  .clk(src_clk),
-  .resetn(src_resetn),
-  .s_valid(src_req_spltr_valid),
-  .s_ready(src_req_spltr_ready),
-  .m_valid({
-    src_req_valid,
-    src_dest_valid
-  }),
-  .m_ready({
-    src_req_ready,
-    src_dest_ready
-  })
-);
+always @(posedge src_clk) begin
+  if (src_req_valid == 1'b1 && src_req_ready == 1'b1) begin
+    src_req_dest_address_cur <= src_req_dest_address;
+    src_req_xlast_cur <= src_req_xlast;
+  end
+end
+
+always @(posedge src_clk) begin
+  if (src_resetn == 1'b0) begin
+    src_dest_valid_hs <= 1'b0;
+  end else if (src_req_valid == 1'b1 && src_req_ready == 1'b1) begin
+    src_dest_valid_hs <= 1'b1;
+  end else if (src_dest_ready_hs == 1'b1) begin
+    src_dest_valid_hs <= 1'b0;
+  end
+end
+
+assign src_dest_valid_hs_masked = src_dest_valid_hs == 1'b1 && block_descr_to_dst == 1'b0;
+assign src_req_spltr_ready = src_req_ready && src_dest_ready_hs;
+assign src_req_valid = src_req_spltr_valid && src_req_spltr_ready;
+
 
 util_axis_fifo #(
   .DATA_WIDTH(BEATS_PER_BURST_WIDTH_SRC),

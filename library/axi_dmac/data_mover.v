@@ -47,9 +47,15 @@ module dmac_data_mover #(
   output [ID_WIDTH-1:0] response_id,
   input eot,
 
-  output reg                             bl_valid = 'b0,
+  output reg rewind_req_valid = 1'b0,
+  input rewind_req_ready,
+  output reg [ID_WIDTH-1:0] rewind_req_data = 'h0,
+
+  output reg                             bl_valid = 1'b0,
   input                                  bl_ready,
   output reg [BEATS_PER_BURST_WIDTH-1:0] measured_last_burst_length,
+
+  output block_descr_to_dst,
 
   output [ID_WIDTH-1:0] source_id,
   output source_eot,
@@ -97,20 +103,24 @@ wire transfer_abort_s;
 
 wire last_load;
 wire last;
+wire early_tlast;
 
 assign xfer_req = active;
 
 assign response_id = id;
 
 assign source_id = id;
-assign source_eot = eot; // || TLAST
+assign source_eot = eot || early_tlast;
 
 assign last = eot ? last_eot : last_non_eot;
 
 assign s_axi_ready = (pending_burst & active) & ~transfer_abort_s;
-assign m_axi_valid = (s_axi_sync_valid | transfer_abort_s) & pending_burst & active;
-assign m_axi_data = transfer_abort_s == 1'b1 ? {DATA_WIDTH{1'b0}} : s_axi_data;
-assign m_axi_last = last;
+assign m_axi_valid = s_axi_sync_valid & pending_burst & active;
+assign m_axi_data = s_axi_data;
+assign m_axi_last = last || early_tlast;
+assign m_axi_partial_burst = early_tlast;
+
+assign block_descr_to_dst = transfer_abort_s;
 
 generate if (ALLOW_ABORT == 1) begin
   reg transfer_abort = 1'b0;
@@ -124,6 +134,8 @@ generate if (ALLOW_ABORT == 1) begin
    */
   always @(posedge clk) begin
     if (resetn == 1'b0) begin
+      transfer_abort <= 1'b0;
+    end else if (req_valid == 1'b1 && req_ready == 1'b1 && req_xlast_d == 1'b1) begin
       transfer_abort <= 1'b0;
     end else if (m_axi_valid == 1'b1) begin
       if (last == 1'b1 && eot == 1'b1 && req_xlast_d == 1'b1) begin
@@ -141,12 +153,29 @@ generate if (ALLOW_ABORT == 1) begin
   end
 
   assign transfer_abort_s = transfer_abort;
-  assign m_axi_partial_burst = (transfer_abort == 1'b0) && (s_axi_last == 1'b1) &&
-                              !(last == 1'b1 && eot == 1'b1 && req_xlast_d == 1'b1);
+  assign early_tlast = (s_axi_valid == 1'b1) && (s_axi_last == 1'b1) &&
+                       !(last == 1'b1 && eot == 1'b1 && req_xlast_d == 1'b1);
+
+  always @(posedge clk) begin
+    if (resetn == 1'b0) begin
+      rewind_req_valid <= 1'b0;
+    end else if (early_tlast == 1'b1) begin
+      rewind_req_valid <= 1'b1;
+      rewind_req_data <= {id};
+    end else if (rewind_req_ready == 1'b1) begin
+      rewind_req_valid <= 1'b0;
+    end
+  end
 
 end else begin
   assign transfer_abort_s = 1'b0;
-  assign m_axi_partial_burst = 1'b0;
+  assign early_tlast = 1'b0;
+
+  always @(*) begin
+   rewind_req_valid = 1'b0;
+   rewind_req_data = 'h0;
+  end
+
 end endgenerate
 
 /*
@@ -164,7 +193,7 @@ end
 // If we want to support zero delay between transfers we have to assert
 // req_ready on the same cycle on which the last load happens.
 assign last_load = m_axi_valid && last_eot && eot;
-assign req_ready = last_load || ~active;
+assign req_ready = last_load || ~active || transfer_abort_s;
 
 always @(posedge clk) begin
   if (req_ready) begin
@@ -192,7 +221,7 @@ always @(posedge clk) begin
 end
 
 always @(posedge clk) begin
-  if (last_load) begin  // || TLAST
+  if (last_load || early_tlast) begin
     bl_valid <= 1'b1;
     measured_last_burst_length <= beat_counter_minus_one;
   end else if (bl_ready) begin
@@ -212,7 +241,7 @@ end
 
 always @(*)
 begin
-  if (m_axi_valid == 1'b1 && last == 1'b1)
+  if (m_axi_valid == 1'b1 && (last == 1'b1 || early_tlast == 1'b1))
     id_next <= inc_id(id);
   else
     id_next <= id;

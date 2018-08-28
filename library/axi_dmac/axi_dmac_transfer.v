@@ -216,7 +216,7 @@ axi_dmac_reset_manager #(
 
   .req_resetn (req_resetn),
   .req_enable (req_enable),
-  .req_enabled (req_enable),
+  .req_enabled (req_enabled),
 
   .dest_clk (dest_clk),
   .dest_ext_resetn (dest_ext_resetn),
@@ -239,8 +239,8 @@ axi_dmac_reset_manager #(
  * care to not accidentally accept requests while the DMA is going through a
  * shutdown and reset phase.
  */
-assign req_valid_gated = req_enable & req_valid;
-assign req_ready = req_enable & req_ready_gated;
+assign req_valid_gated = req_enabled & req_valid;
+assign req_ready = req_enabled & req_ready_gated;
 
 generate if (DMA_2D_TRANSFER == 1) begin
 
@@ -340,6 +340,7 @@ dmac_request_arb #(
   .response_ready (req_response_ready),
 
   .req_enable (req_enable),
+  .req_enabled (req_enabled),
 
   .dest_clk (dest_clk),
   .dest_ext_resetn (dest_ext_resetn),

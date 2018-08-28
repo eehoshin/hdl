@@ -60,10 +60,24 @@ module axi_dmac_response_manager #(
   output reg [DMA_LENGTH_WIDTH-1:0] measured_transfer_length = 'h0,
   output reg response_partial = 1'b0,
   output reg response_valid = 1'b0,
-  input response_ready
+  input response_ready,
+
+  input req_enable,
+  output reg req_enabled = 1'b0,
 
   // Interface to requester side
+  input completion_req_valid,
+  input [1:0] completion_transfer_id
 );
+
+localparam STATE_IDLE         = 3'h0;
+localparam STATE_ACC1         = 3'h1;
+localparam STATE_ACC2         = 3'h2;
+localparam STATE_WRITE_RESPR  = 3'h3;
+localparam STATE_ZERO_COMPL   = 3'h4;
+
+reg [2:0] state = STATE_IDLE;
+reg [2:0] nx_state;
 
 localparam DEST_SRC_RATIO = DMA_DATA_WIDTH_DEST/DMA_DATA_WIDTH_SRC;
 
@@ -78,8 +92,8 @@ localparam DEST_SRC_RATIO_WIDTH = DEST_SRC_RATIO > 64 ? 7 :
 localparam BYTES_PER_BEAT_WIDTH = DEST_SRC_RATIO_WIDTH + BYTES_PER_BEAT_WIDTH_SRC;
 localparam BURST_LEN_WIDTH = BYTES_PER_BURST_WIDTH - BYTES_PER_BEAT_WIDTH;
 
-reg do_acc_st1 = 1'b0;
-reg do_acc_st2 = 1'b0;
+wire do_acc_st1;
+wire do_acc_st2;
 reg req_eot = 1'b0;
 reg [BYTES_PER_BURST_WIDTH-1:0] req_response_dest_data_burst_length = 'h0;
 reg [BYTES_PER_BURST_WIDTH-1:0] req_burst_length_adjusted = 'h0;
@@ -89,6 +103,12 @@ reg response_dest_ready = 1'b1;
 wire [1:0] response_dest_resp;
 wire response_dest_resp_eot;
 wire [BYTES_PER_BURST_WIDTH-1:0] response_dest_data_burst_length;
+
+reg [1:0] to_complete_count = 'h0;
+reg [1:0] transfer_id = 'h0;
+
+wire [BURST_LEN_WIDTH-1:0] burst_lenght;
+reg [BURST_LEN_WIDTH-1:0] burst_pointer_end;
 
 
 util_axis_fifo #(
@@ -131,23 +151,17 @@ begin
   if (req_resetn == 1'b0) begin
     response_dest_ready <= 1'b1;
   end else begin
-    if (response_dest_valid == 1'b1) begin
-      response_dest_ready <= 1'b0;
-    end else if (response_ready == 1'b1 && response_valid == 1'b1) begin
-      response_dest_ready <= 1'b1;
-    end
+    response_dest_ready <= (nx_state == STATE_IDLE);
   end
 end
 
 always @(posedge req_clk)
 begin
   if (req_resetn == 1'b0) begin
-    do_acc_st1 <= 1'b0;
-    do_acc_st2 <= 1'b0;
     response_eot <= 1'b0;
-  end else begin
-    do_acc_st1 <= response_dest_valid & response_dest_ready;
-    do_acc_st2 <= do_acc_st1;
+  end else if (state == STATE_ZERO_COMPL) begin
+    response_eot <= 1'b1;
+  end else if (do_acc_st2 == 1'b1) begin
     response_eot <= req_eot;
   end
 end
@@ -157,16 +171,13 @@ begin
   if (req_resetn == 1'b0) begin
     response_valid <= 1'b0;
   end else begin
-    if (do_acc_st2 == 1'b1) begin
+    if (nx_state == STATE_WRITE_RESPR) begin
       response_valid <= 1'b1;
     end else if (response_ready == 1'b1) begin
       response_valid <= 1'b0;
     end
   end
 end
-
-wire [BURST_LEN_WIDTH-1:0] burst_lenght;
-reg [BURST_LEN_WIDTH-1:0] burst_pointer_end;
 
 // transform the free running pointer into burst length
 assign burst_lenght = req_response_dest_data_burst_length[BYTES_PER_BURST_WIDTH-1 -: BURST_LEN_WIDTH] -
@@ -195,4 +206,79 @@ begin
   end
 end
 
+always @(*) begin
+  nx_state = state;
+  case (state)
+    STATE_IDLE: begin
+      if (response_dest_valid == 1'b1) begin
+        nx_state = STATE_ACC1;
+      end else if (|to_complete_count) begin
+        if (transfer_id == completion_transfer_id)
+          nx_state = STATE_ZERO_COMPL;
+      end
+    end
+    STATE_ACC1: begin
+      nx_state = STATE_ACC2;
+    end
+    STATE_ACC2: begin
+      nx_state = STATE_WRITE_RESPR;
+    end
+    STATE_WRITE_RESPR: begin
+      if (response_ready == 1'b1) begin
+        nx_state = STATE_IDLE;
+      end
+    end
+    STATE_ZERO_COMPL: begin
+      nx_state = STATE_WRITE_RESPR;
+    end
+    default: begin
+      nx_state = STATE_IDLE;
+    end
+  endcase
+end
+
+always @(posedge req_clk) begin
+  if (req_resetn == 1'b0) begin
+    state <= STATE_IDLE;
+  end else begin
+    state <= nx_state;
+  end
+end
+
+assign do_acc_st1 = state == STATE_ACC1;
+assign do_acc_st2 = state == STATE_ACC2;
+
+// track transfers so we can tell when did the destination completed all its
+// transfers  
+always @(posedge req_clk) begin
+  if (req_resetn == 1'b0) begin
+    transfer_id <= 'h0;
+  end else if (state == STATE_ACC1 && req_eot) begin
+    transfer_id <= transfer_id + 1;
+  end
+end
+
+// count how many transfers we need to complete 
+always @(posedge req_clk) begin
+  if (req_resetn == 1'b0) begin
+    to_complete_count <= 'h0;
+  end else if (completion_req_valid & (state != STATE_ZERO_COMPL)) begin
+    to_complete_count <= to_complete_count + 1;
+  end else if (~completion_req_valid & (state == STATE_ZERO_COMPL)) begin
+    to_complete_count <= to_complete_count - 1;
+  end
+end
+
+always @(posedge req_clk)
+begin
+  if (req_resetn == 1'b0) begin
+    req_enabled <= 1'b0;
+  end else begin
+    if (req_enable) begin
+      req_enabled <= 1'b1;
+    end else if (state == STATE_IDLE && to_complete_count == 'h0) begin
+      req_enabled <= 1'b0;
+    end
+  end
+end
 endmodule

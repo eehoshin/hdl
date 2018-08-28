@@ -159,6 +159,7 @@ module dmac_request_arb #(
   output [ID_WIDTH-1:0]               dbg_src_response_id,
 
   input req_enable,
+  output req_enabled,
 
   output dest_clk,
   input dest_resetn,
@@ -297,6 +298,12 @@ reg src_dest_valid_hs = 1'b0;
 wire src_dest_valid_hs_masked;
 wire src_dest_ready_hs;
 wire block_descr_to_dst;
+
+wire req_rewind_req_valid;
+wire [ID_WIDTH+3-1:0] req_rewind_req_data;
+
+wire completion_req_valid;
+wire [1:0] completion_transfer_id;
 
 /* Unused for now
 wire response_src_valid;
@@ -654,6 +661,9 @@ assign dbg_src_data_id = 'h00;
 assign src_response_valid = 1'b0;
 assign src_response_resp = 2'b0;
 */
+wire rewind_req_valid;
+wire rewind_req_ready;
+wire [ID_WIDTH+3-1:0] rewind_req_data;
 
 dmac_src_axi_stream #(
   .ID_WIDTH(ID_WIDTH),
@@ -677,9 +687,9 @@ dmac_src_axi_stream #(
 
   .eot(src_eot),
 
-  .rewind_req_valid(),
-  .rewind_req_ready(1'b1),
-  .rewind_req_data(),
+  .rewind_req_valid(rewind_req_valid),
+  .rewind_req_ready(rewind_req_ready),
+  .rewind_req_data(rewind_req_data),
 
   .bl_valid(src_bl_valid),
   .bl_ready(src_bl_ready),
@@ -702,10 +712,34 @@ dmac_src_axi_stream #(
   .s_axis_xfer_req(s_axis_xfer_req)
 );
 
+util_axis_fifo #(
+  .DATA_WIDTH(ID_WIDTH + 3),
+  .ADDRESS_WIDTH(0),
+  .ASYNC_CLK(ASYNC_CLK_REQ_SRC)
+) i_rewind_req_fifo (
+  .s_axis_aclk(src_clk),
+  .s_axis_aresetn(src_resetn),
+  .s_axis_valid(rewind_req_valid),
+  .s_axis_ready(rewind_req_ready),
+  .s_axis_empty(),
+  .s_axis_data(rewind_req_data),
+  .s_axis_room(),
+
+  .m_axis_aclk(req_clk),
+  .m_axis_aresetn(req_resetn),
+  .m_axis_valid(req_rewind_req_valid),
+  .m_axis_ready(1'b1),
+  .m_axis_data(req_rewind_req_data),
+  .m_axis_level()
+);
+
 end else begin
 
 assign s_axis_ready = 1'b0;
 assign s_axis_xfer_req = 1'b0;
+
+assign req_rewind_req_valid = 'b0;
+assign req_rewind_req_data = 'h0;
 
 end
 
@@ -898,23 +932,9 @@ axi_register_slice #(
   })
 );
 
-splitter #(
-  .NUM_M(2)
-) i_req_splitter (
-  .clk(req_clk),
-  .resetn(req_resetn),
-  .s_valid(req_valid),
-  .s_ready(req_ready),
-  .m_valid({
-    req_gen_valid,
-    req_src_valid
-  }),
-  .m_ready({
-    req_gen_ready,
-    req_src_ready
-  })
-);
-
+assign req_gen_valid = req_valid & req_ready;
+assign req_src_valid = req_valid & req_ready;
+assign req_ready = req_gen_ready & req_src_ready;
 
 util_axis_fifo #(
   .DATA_WIDTH(DMA_ADDRESS_WIDTH_DEST + 1),
@@ -1063,9 +1083,16 @@ dmac_request_generator #(
   .request_id(request_id),
   .response_id(response_id),
 
+  .rewind_req_valid(req_rewind_req_valid),
+  .rewind_req_data(req_rewind_req_data),
+
+  .completion_req_valid(completion_req_valid),
+  .completion_transfer_id(completion_transfer_id),
+
   .req_valid(req_gen_valid),
   .req_ready(req_gen_ready),
   .req_burst_count(req_length[DMA_LENGTH_WIDTH-1:BYTES_PER_BURST_WIDTH]),
+  .req_xlast(req_xlast),
 
   .enable(req_enable),
 
@@ -1095,7 +1122,14 @@ axi_dmac_response_manager #(
   .measured_transfer_length(measured_transfer_length),
   .response_partial(response_partial),
   .response_valid(response_valid),
-  .response_ready(response_ready)
+  .response_ready(response_ready),
+
+  .req_enable (req_enable),
+  .req_enabled (req_enabled),
+
+  .completion_req_valid(completion_req_valid),
+  .completion_transfer_id(completion_transfer_id)
+
 );
 
 

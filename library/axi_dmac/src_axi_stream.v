@@ -52,7 +52,7 @@ module dmac_src_axi_stream #(
 
   output rewind_req_valid,
   input rewind_req_ready,
-  output [ID_WIDTH-1:0] rewind_req_data,
+  output [ID_WIDTH+3-1:0] rewind_req_data,
 
   output                             bl_valid,
   input                              bl_ready,
